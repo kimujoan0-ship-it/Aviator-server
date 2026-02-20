@@ -179,7 +179,7 @@ app.post("/pay", async (req, res) => {
     };
 
     const resp = await axios.post(
-      "https://swiftwallet.co.ke/v3/stk-initiate/",
+      "https://swiftwallet.co.ke/pay-app-v2/payments.php",
       payload,
       {
         headers: {
@@ -211,10 +211,10 @@ app.post("/pay", async (req, res) => {
       res.status(400).json({ error: "Failed to initiate STK push" });
     }
 
-  } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "Payment initiation error" });
-  }
+   } catch (err) {
+  console.error("STK ERROR:", err.response?.status, err.response?.data || err.message);
+  res.status(500).json({ error: "Payment initiation error" });
+}
 });
 
 /* =======================
@@ -285,3 +285,4 @@ app.get("/receipt/:reference", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+      
