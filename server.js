@@ -54,7 +54,7 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Forgot Password
+// Forgot Passwords
 app.post('/forgot-password', async (req, res) => {
   const { username } = req.body;
   try {
