@@ -1,29 +1,64 @@
 
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const PDFDocument = require("pdfkit");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => {
-  res.send('Server is running');
-});
+const PORT = process.env.PORT || 3000;
 
-// Railway PostgreSQL Connection
+/* =========================
+   DATABASE CONNECTION
+========================= */
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Test DB Connection
 pool.connect()
-  .then(() => console.log('Connected to Railway PostgreSQL'))
-  .catch(err => console.error('Connection error', err.stack));
+  .then(() => console.log("✅ Connected to Railway PostgreSQL"))
+  .catch(err => console.error("❌ DB Connection error", err.stack));
 
-// Signup Endpoint
+/* =========================
+   RECEIPTS (JSON - OPTION A)
+========================= */
+
+const receiptsFile = path.join(__dirname, "receipts.json");
+
+function readReceipts() {
+  if (!fs.existsSync(receiptsFile)) return {};
+  return JSON.parse(fs.readFileSync(receiptsFile));
+}
+
+function writeReceipts(data) {
+  fs.writeFileSync(receiptsFile, JSON.stringify(data, null, 2));
+}
+
+function formatPhone(phone) {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length === 9 && digits.startsWith("7")) return "254" + digits;
+  if (digits.length === 10 && digits.startsWith("07"))
+    return "254" + digits.substring(1);
+  if (digits.length === 12 && digits.startsWith("254")) return digits;
+  return null;
+}
+
+/* =========================
+   AUTH ROUTES
+========================= */
+
+app.get('/', (req, res) => {
+  res.send('Unified Server Running');
+});
+
 app.post('/signup', async (req, res) => {
   const { username, phone, pin, referralCode } = req.body;
   try {
@@ -44,12 +79,10 @@ app.post('/signup', async (req, res) => {
     res.json({ success: true, message: 'Signup successful' });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Server error during signup' });
   }
 });
 
-// Login Endpoint
 app.post('/login', async (req, res) => {
   const { phone, pin } = req.body;
   try {
@@ -65,33 +98,10 @@ app.post('/login', async (req, res) => {
     }
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Server error during login' });
   }
 });
 
-// Forgot Password
-app.post('/forgot-password', async (req, res) => {
-  const { username } = req.body;
-  try {
-    const user = await pool.query(
-      'SELECT pin FROM users WHERE username = $1',
-      [username]
-    );
-
-    if (user.rows.length > 0) {
-      res.json({ success: true, pin: user.rows[0].pin });
-    } else {
-      res.status(404).json({ error: 'User not found' });
-    }
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Refresh Balance Endpoint
 app.post('/refresh-balance', async (req, res) => {
   const { phone } = req.body;
   try {
@@ -107,39 +117,163 @@ app.post('/refresh-balance', async (req, res) => {
     }
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Server error fetching balance' });
   }
 });
 
-// ✅ NEW: Update Balance After Successful Deposit (STK Callback Will Use This)
-app.post('/update-balance', async (req, res) => {
-  const { phone, amount } = req.body;
+/* =========================
+   STK PAYMENT ROUTES
+========================= */
 
-  if (!phone || !amount) {
-    return res.status(400).json({ error: 'Phone and amount are required' });
-  }
-
+app.post("/pay", async (req, res) => {
   try {
-    const result = await pool.query(
-      'UPDATE users SET balance = balance + $1 WHERE phone = $2 RETURNING balance',
-      [amount, phone]
+    const { phone, amount } = req.body;
+    const formattedPhone = formatPhone(phone);
+
+    if (!formattedPhone)
+      return res.status(400).json({ success: false, error: "Invalid phone format" });
+
+    if (!amount || amount < 1)
+      return res.status(400).json({ success: false, error: "Amount must be >= 1" });
+
+    const reference = "ORDER-" + Date.now();
+
+    const payload = {
+      amount: Math.round(amount),
+      phone_number: formattedPhone,
+      external_reference: reference,
+      customer_name: "Customer",
+      callback_url: process.env.BASE_URL + "/callback",
+      channel_id: "000586"
+    };
+
+    const resp = await axios.post(
+      "https://swiftwallet.co.ke/v3/stk-initiate/",
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.SWIFTWALLET_KEY}`,
+          "Content-Type": "application/json"
+        }
+      }
     );
 
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: 'User not found' });
+    if (resp.data.success) {
+      const receiptData = {
+        reference,
+        amount: Math.round(amount),
+        phone: formattedPhone,
+        status: "pending",
+        timestamp: new Date().toISOString()
+      };
+
+      let receipts = readReceipts();
+      receipts[reference] = receiptData;
+      writeReceipts(receipts);
+
+      res.json({ success: true, reference });
+
+    } else {
+      res.status(400).json({
+        success: false,
+        error: resp.data.error || "Failed to initiate payment"
+      });
     }
 
-    res.json({
-      success: true,
-      newBalance: result.rows[0].balance
-    });
-
   } catch (err) {
-    console.error('Balance update error:', err);
-    res.status(500).json({ error: 'Failed to update balance' });
+    res.status(500).json({
+      success: false,
+      error: err.message || "Server error"
+    });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.post("/callback", async (req, res) => {
+  const data = req.body;
+  const ref = data.external_reference;
+
+  let receipts = readReceipts();
+  const existingReceipt = receipts[ref] || {};
+  const resultCode = data.result?.ResultCode;
+
+  if (resultCode === 0) {
+
+    receipts[ref] = {
+      ...existingReceipt,
+      status: "success",
+      transaction_code: data.result?.MpesaReceiptNumber || null,
+      amount: data.result?.Amount || existingReceipt.amount,
+      phone: data.result?.Phone || existingReceipt.phone,
+      timestamp: new Date().toISOString()
+    };
+
+    writeReceipts(receipts);
+
+    // ✅ DIRECT DATABASE UPDATE (NO HTTP CALL)
+    try {
+      await pool.query(
+        'UPDATE users SET balance = balance + $1 WHERE phone = $2',
+        [receipts[ref].amount, receipts[ref].phone]
+      );
+      console.log("✅ Balance updated in PostgreSQL");
+    } catch (err) {
+      console.error("❌ DB update failed:", err.message);
+    }
+
+  } else {
+    receipts[ref] = {
+      ...existingReceipt,
+      status: "failed",
+      timestamp: new Date().toISOString()
+    };
+    writeReceipts(receipts);
+  }
+
+  res.json({ ResultCode: 0, ResultDesc: "Callback received" });
+});
+
+/* =========================
+   RECEIPT ROUTES
+========================= */
+
+app.get("/receipt/:reference", (req, res) => {
+  const { reference } = req.params;
+  const receipts = readReceipts();
+  const receipt = receipts[reference];
+
+  if (!receipt) {
+    return res.status(404).json({ success: false, error: "Receipt not found" });
+  }
+
+  res.json({ success: true, receipt });
+});
+
+app.get("/receipt/:reference/pdf", (req, res) => {
+  const { reference } = req.params;
+  const receipts = readReceipts();
+  const receipt = receipts[reference];
+
+  if (!receipt) {
+    return res.status(404).json({ error: "Receipt not found" });
+  }
+
+  const doc = new PDFDocument();
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename=${reference}.pdf`);
+  doc.pipe(res);
+
+  doc.fontSize(18).text("Payment Receipt", { align: "center" });
+  doc.moveDown();
+  doc.text(`Reference: ${receipt.reference}`);
+  doc.text(`Phone: ${receipt.phone}`);
+  doc.text(`Amount: KES ${receipt.amount}`);
+  doc.text(`Status: ${receipt.status}`);
+  doc.text(`Transaction Code: ${receipt.transaction_code || "N/A"}`);
+  doc.text(`Date: ${receipt.timestamp}`);
+
+  doc.end();
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Unified Server running on port ${PORT}`);
+});
