@@ -139,6 +139,7 @@ app.post('/bet', async (req, res) => {
 
     await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [betAmount, phone]);
     await pool.query('INSERT INTO bets (phone, amount, status) VALUES ($1, $2, $3)', [phone, betAmount, 'placed']);
+    await pool.query('INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)', [phone, betAmount, 'bet', 'success']);
     
     res.json({ success: true, balance: currentBalance - betAmount });
   } catch (err) {
@@ -155,6 +156,7 @@ app.post('/cashout', async (req, res) => {
     
     await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [winAmount, phone]);
     await pool.query('INSERT INTO bets (phone, amount, multiplier, status) VALUES ($1, $2, $3, $4)', [phone, winAmount, mult, 'cashed_out']);
+    await pool.query('INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)', [phone, winAmount, 'win', 'success']);
     
     const user = await pool.query('SELECT balance FROM users WHERE phone = $1', [phone]);
     res.json({ success: true, balance: parseFloat(user.rows[0].balance) });
@@ -188,6 +190,108 @@ app.get('/admin/stats', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Server error fetching stats' });
   }
+});
+
+
+/* =========================
+   ADMIN ADDITIONAL ROUTES
+========================= */
+app.post('/admin/set-odds', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  try {
+    await pool.query("INSERT INTO settings (setting_key, setting_value) VALUES ('next_multiplier', $1) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value", [req.body.multiplier]);
+    res.json({success: true});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/next-odd', async (req, res) => {
+  try {
+    const s = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'next_multiplier'");
+    let mult = null;
+    if(s.rows.length > 0 && s.rows[0].setting_value) {
+      mult = parseFloat(s.rows[0].setting_value);
+      await pool.query("UPDATE settings SET setting_value = '' WHERE setting_key = 'next_multiplier'");
+      res.json({success: true, multiplier: mult});
+    } else {
+      res.json({success: true, multiplier: null});
+    }
+  } catch(e) { res.json({success: false}); }
+});
+
+app.get('/admin/users', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  try {
+    const users = await pool.query("SELECT id, username, phone, pin, balance, status FROM users ORDER BY id DESC");
+    res.json({success: true, users: users.rows});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/admin/users/action', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  const { action, userId, amount } = req.body;
+  try {
+    if(action === 'delete') await pool.query("DELETE FROM users WHERE id = $1", [userId]);
+    else if(action === 'suspend') await pool.query("UPDATE users SET status = 'suspended' WHERE id = $1", [userId]);
+    else if(action === 'activate') await pool.query("UPDATE users SET status = 'active' WHERE id = $1", [userId]);
+    else if(action === 'adjust') {
+      await pool.query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, userId]);
+      const u = await pool.query("SELECT phone FROM users WHERE id = $1", [userId]);
+      if(u.rows.length > 0) {
+        await pool.query("INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)", [u.rows[0].phone, amount, 'admin_adjustment', 'success']);
+      }
+    }
+    res.json({success: true});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/admin/transactions', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  try {
+    const tx = await pool.query("SELECT * FROM transactions ORDER BY created_at DESC LIMIT 100");
+    res.json({success: true, transactions: tx.rows});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/admin/send-notification', async (req, res) => {
+  const pwd = req.headers['authorization'];
+  if(pwd !== '3462Abel@#') return res.status(401).json({error: 'Unauthorized'});
+  const { target, phone, message } = req.body;
+  try {
+    let count = 0;
+    if(target === 'all') {
+      const users = await pool.query("SELECT phone FROM users WHERE status = 'active'");
+      for(const u of users.rows) {
+        await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [u.phone, message]);
+        count++;
+      }
+    } else if(target === 'specific' && phone) {
+      await pool.query("INSERT INTO notifications (phone, message) VALUES ($1, $2)", [phone, message]);
+      count = 1;
+    }
+    res.json({success: true, count});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.get('/api/notifications', async (req, res) => {
+  const { phone } = req.query;
+  if(!phone) return res.status(400).json({error: 'Phone required'});
+  try {
+    const notifs = await pool.query("SELECT * FROM notifications WHERE phone = $1 ORDER BY created_at DESC LIMIT 50", [phone]);
+    res.json({success: true, notifications: notifs.rows});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+app.post('/api/notifications/mark-read', async (req, res) => {
+  const { phone } = req.body;
+  if(!phone) return res.status(400).json({error: 'Phone required'});
+  try {
+    await pool.query("UPDATE notifications SET is_read = true WHERE phone = $1", [phone]);
+    res.json({success: true});
+  } catch(e) { res.status(500).json({error: e.message}); }
 });
 
 /* =========================
@@ -284,6 +388,10 @@ app.post("/callback", async (req, res) => {
         'UPDATE users SET balance = balance + $1 WHERE phone = $2',
         [receipts[ref].amount, receipts[ref].phone]
       );
+      await pool.query('INSERT INTO transactions (phone, amount, type, reference, status) VALUES ($1, $2, $3, $4, $5)', 
+        [receipts[ref].phone, receipts[ref].amount, 'deposit', ref, 'success']);
+      await pool.query('INSERT INTO notifications (phone, message) VALUES ($1, $2)',
+        [receipts[ref].phone, `Your deposit of KSH ${receipts[ref].amount} was successful.`]);
       console.log("✅ Balance updated in PostgreSQL");
     } catch (err) {
       console.error("❌ DB update failed:", err.message);
