@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require("express");
 const cors = require("cors");
@@ -118,6 +117,76 @@ app.post('/refresh-balance', async (req, res) => {
 
   } catch (err) {
     res.status(500).json({ error: 'Server error fetching balance' });
+  }
+});
+
+/* =========================
+   BETTING & CASH OUT
+========================= */
+
+app.post('/bet', async (req, res) => {
+  const { phone, amount } = req.body;
+  try {
+    const user = await pool.query('SELECT balance FROM users WHERE phone = $1', [phone]);
+    if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    
+    let currentBalance = parseFloat(user.rows[0].balance);
+    let betAmount = parseFloat(amount);
+    
+    if (currentBalance < betAmount) {
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+
+    await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [betAmount, phone]);
+    await pool.query('INSERT INTO bets (phone, amount, status) VALUES ($1, $2, $3)', [phone, betAmount, 'placed']);
+    
+    res.json({ success: true, balance: currentBalance - betAmount });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error placing bet' });
+  }
+});
+
+app.post('/cashout', async (req, res) => {
+  const { phone, amount, multiplier } = req.body;
+  try {
+    let winAmount = parseFloat(amount);
+    let mult = parseFloat(multiplier);
+    
+    await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [winAmount, phone]);
+    await pool.query('INSERT INTO bets (phone, amount, multiplier, status) VALUES ($1, $2, $3, $4)', [phone, winAmount, mult, 'cashed_out']);
+    
+    const user = await pool.query('SELECT balance FROM users WHERE phone = $1', [phone]);
+    res.json({ success: true, balance: parseFloat(user.rows[0].balance) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error cashing out' });
+  }
+});
+
+/* =========================
+   ADMIN DASHBOARD
+========================= */
+
+app.get('/admin/stats', async (req, res) => {
+  const password = req.headers['authorization'];
+  if (password !== '3462Abel@#') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const totalUsers = await pool.query('SELECT COUNT(*) FROM users');
+    const totalBalance = await pool.query('SELECT SUM(balance) FROM users');
+    const totalBets = await pool.query('SELECT COUNT(*) FROM bets');
+    
+    res.json({ 
+      success: true, 
+      users: parseInt(totalUsers.rows[0].count),
+      balance: parseFloat(totalBalance.rows[0].sum || 0),
+      bets: parseInt(totalBets.rows[0].count)
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error fetching stats' });
   }
 });
 
