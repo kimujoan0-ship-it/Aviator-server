@@ -60,10 +60,15 @@ app.get('/', (req, res) => {
 
 app.post('/signup', async (req, res) => {
   const { username, phone, pin, referralCode } = req.body;
+
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone) {
+    return res.status(400).json({ error: "Invalid phone format" });
+  }
   try {
     const checkUser = await pool.query(
       'SELECT * FROM users WHERE phone = $1 OR username = $2',
-      [phone, username]
+      [formattedPhone, username]
     );
 
     if (checkUser.rows.length > 0) {
@@ -72,7 +77,7 @@ app.post('/signup', async (req, res) => {
 
     await pool.query(
       'INSERT INTO users (username, phone, pin, balance, referral_code) VALUES ($1, $2, $3, 0, $4)',
-      [username, phone, pin, referralCode || null]
+      [username, formattedPhone, pin, referralCode || null]
     );
 
     res.json({ success: true, message: 'Signup successful' });
@@ -84,10 +89,11 @@ app.post('/signup', async (req, res) => {
 
 app.post('/login', async (req, res) => {
   const { phone, pin } = req.body;
+   const formattedPhone = formatPhone(phone);
   try {
     const user = await pool.query(
       'SELECT username, phone, balance FROM users WHERE phone = $1 AND pin = $2',
-      [phone, pin]
+      [formattedPhone, pin]
     );
 
     if (user.rows.length > 0) {
@@ -103,10 +109,11 @@ app.post('/login', async (req, res) => {
 
 app.post('/refresh-balance', async (req, res) => {
   const { phone } = req.body;
+  const formattedPhone = formatPhone(phone);
   try {
     const user = await pool.query(
       'SELECT balance FROM users WHERE phone = $1',
-      [phone]
+      [formattedPhone]
     );
 
     if (user.rows.length > 0) {
@@ -126,22 +133,43 @@ app.post('/refresh-balance', async (req, res) => {
 
 app.post('/bet', async (req, res) => {
   const { phone, amount } = req.body;
+
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone)
+    return res.status(400).json({ error: 'Invalid phone format' });
+
   try {
-    const user = await pool.query('SELECT balance FROM users WHERE phone = $1', [phone]);
-    if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    
+    const user = await pool.query(
+      'SELECT balance FROM users WHERE phone = $1',
+      [formattedPhone]
+    );
+
+    if (user.rows.length === 0)
+      return res.status(404).json({ error: 'User not found' });
+
     let currentBalance = parseFloat(user.rows[0].balance);
     let betAmount = parseFloat(amount);
-    
-    if (currentBalance < betAmount) {
-      return res.status(400).json({ error: 'Insufficient balance' });
-    }
 
-    await pool.query('UPDATE users SET balance = balance - $1 WHERE phone = $2', [betAmount, phone]);
-    await pool.query('INSERT INTO bets (phone, amount, status) VALUES ($1, $2, $3)', [phone, betAmount, 'placed']);
-    await pool.query('INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)', [phone, betAmount, 'bet', 'success']);
-    
+    if (currentBalance < betAmount)
+      return res.status(400).json({ error: 'Insufficient balance' });
+
+    await pool.query(
+      'UPDATE users SET balance = balance - $1 WHERE phone = $2',
+      [betAmount, formattedPhone]
+    );
+
+    await pool.query(
+      'INSERT INTO bets (phone, amount, status) VALUES ($1, $2, $3)',
+      [formattedPhone, betAmount, 'placed']
+    );
+
+    await pool.query(
+      'INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)',
+      [formattedPhone, betAmount, 'bet', 'success']
+    );
+
     res.json({ success: true, balance: currentBalance - betAmount });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error placing bet' });
@@ -150,16 +178,37 @@ app.post('/bet', async (req, res) => {
 
 app.post('/cashout', async (req, res) => {
   const { phone, amount, multiplier } = req.body;
+
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone)
+    return res.status(400).json({ error: 'Invalid phone format' });
+
   try {
     let winAmount = parseFloat(amount);
     let mult = parseFloat(multiplier);
-    
-    await pool.query('UPDATE users SET balance = balance + $1 WHERE phone = $2', [winAmount, phone]);
-    await pool.query('INSERT INTO bets (phone, amount, multiplier, status) VALUES ($1, $2, $3, $4)', [phone, winAmount, mult, 'cashed_out']);
-    await pool.query('INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)', [phone, winAmount, 'win', 'success']);
-    
-    const user = await pool.query('SELECT balance FROM users WHERE phone = $1', [phone]);
+
+    await pool.query(
+      'UPDATE users SET balance = balance + $1 WHERE phone = $2',
+      [winAmount, formattedPhone]
+    );
+
+    await pool.query(
+      'INSERT INTO bets (phone, amount, multiplier, status) VALUES ($1, $2, $3, $4)',
+      [formattedPhone, winAmount, mult, 'cashed_out']
+    );
+
+    await pool.query(
+      'INSERT INTO transactions (phone, amount, type, status) VALUES ($1, $2, $3, $4)',
+      [formattedPhone, winAmount, 'win', 'success']
+    );
+
+    const user = await pool.query(
+      'SELECT balance FROM users WHERE phone = $1',
+      [formattedPhone]
+    );
+
     res.json({ success: true, balance: parseFloat(user.rows[0].balance) });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error cashing out' });
@@ -278,20 +327,42 @@ app.post('/admin/send-notification', async (req, res) => {
 
 app.get('/api/notifications', async (req, res) => {
   const { phone } = req.query;
-  if(!phone) return res.status(400).json({error: 'Phone required'});
+
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone)
+    return res.status(400).json({ error: 'Invalid phone format' });
+
   try {
-    const notifs = await pool.query("SELECT * FROM notifications WHERE phone = $1 ORDER BY created_at DESC LIMIT 50", [phone]);
-    res.json({success: true, notifications: notifs.rows});
-  } catch(e) { res.status(500).json({error: e.message}); }
+    const notifs = await pool.query(
+      "SELECT * FROM notifications WHERE phone = $1 ORDER BY created_at DESC LIMIT 50",
+      [formattedPhone]
+    );
+
+    res.json({ success: true, notifications: notifs.rows });
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/notifications/mark-read', async (req, res) => {
   const { phone } = req.body;
-  if(!phone) return res.status(400).json({error: 'Phone required'});
+
+  const formattedPhone = formatPhone(phone);
+  if (!formattedPhone)
+    return res.status(400).json({ error: 'Invalid phone format' });
+
   try {
-    await pool.query("UPDATE notifications SET is_read = true WHERE phone = $1", [phone]);
-    res.json({success: true});
-  } catch(e) { res.status(500).json({error: e.message}); }
+    await pool.query(
+      "UPDATE notifications SET is_read = true WHERE phone = $1",
+      [formattedPhone]
+    );
+
+    res.json({ success: true });
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /* =========================
