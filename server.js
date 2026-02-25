@@ -295,6 +295,105 @@ app.post('/api/notifications/mark-read', async (req, res) => {
 });
 
 /* =========================
+   GAME ENGINE & SSE
+========================= */
+
+let clients = [];
+let gameStatus = 'WAITING';
+let currentMultiplier = 1.00;
+let currentCrashPoint = 1.00;
+let oddsHistory = [];
+
+app.get('/api/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  
+  // Send initial state
+  res.write(`data: ${JSON.stringify({ status: gameStatus, multiplier: currentMultiplier, history: oddsHistory })}\n\n`);
+  
+  clients.push(res);
+  req.on('close', () => {
+    clients = clients.filter(c => c !== res);
+  });
+});
+
+function broadcast(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  clients.forEach(c => c.write(msg));
+}
+
+async function getNextCrashPoint() {
+   try {
+     const s = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'next_multiplier'");
+     if(s.rows.length > 0 && s.rows[0].setting_value) {
+       let mult = parseFloat(s.rows[0].setting_value);
+       await pool.query("UPDATE settings SET setting_value = '' WHERE setting_key = 'next_multiplier'");
+       return mult;
+     }
+   } catch(e) {}
+   
+   try {
+     const listQuery = await pool.query("SELECT setting_value FROM settings WHERE setting_key = 'odds_list'");
+     if(listQuery.rows.length > 0 && listQuery.rows[0].setting_value) {
+        let list = listQuery.rows[0].setting_value.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+        if(list.length > 0) {
+           return list[Math.floor(Math.random() * list.length)];
+        }
+     }
+   } catch(e) {}
+   
+   const e = 100;
+   const h_rand = Math.random() * 95;
+   let cp = Math.max(1.00, Math.floor(100 * e - e) / (e - h_rand));
+   if (cp > 1500) cp = 1500;
+   return parseFloat(cp.toFixed(2));
+}
+
+async function runGameLoop() {
+   gameStatus = 'WAITING';
+   currentMultiplier = 1.00;
+   broadcast({ status: 'WAITING', time: 6, history: oddsHistory });
+   
+   let waitTime = 6;
+   let waitInt = setInterval(() => {
+      waitTime--;
+      broadcast({ status: 'WAITING', time: waitTime, history: oddsHistory });
+      if(waitTime <= 0) clearInterval(waitInt);
+   }, 1000);
+   
+   await new Promise(r => setTimeout(r, 6000));
+   
+   gameStatus = 'RUNNING';
+   currentCrashPoint = await getNextCrashPoint();
+   
+   let gameInterval = setInterval(() => {
+      let increment = currentMultiplier < 2 ? 0.01 : currentMultiplier < 5 ? 0.05 : 0.1;
+      currentMultiplier += increment;
+      
+      if (currentMultiplier >= currentCrashPoint) {
+         clearInterval(gameInterval);
+         currentMultiplier = currentCrashPoint;
+         gameStatus = 'CRASHED';
+         oddsHistory.unshift(currentCrashPoint.toFixed(2));
+         if(oddsHistory.length > 15) oddsHistory.pop();
+         
+         broadcast({ status: 'CRASHED', multiplier: currentMultiplier, history: oddsHistory });
+         
+         setTimeout(() => {
+            runGameLoop();
+         }, 3000);
+      } else {
+         broadcast({ status: 'RUNNING', multiplier: currentMultiplier });
+      }
+   }, 50);
+}
+
+// Start game engine only after DB connects
+pool.connect().then(() => runGameLoop()).catch(err => console.log(err));
+
+/* =========================
    STK PAYMENT ROUTES
 ========================= */
 
